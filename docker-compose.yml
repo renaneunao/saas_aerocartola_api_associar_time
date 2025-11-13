@@ -1,0 +1,31 @@
+services:
+  times-receiver:
+    image: renaneunao/saas-cartola-times-receiver:latest
+    container_name: cartola-aero-times-receiver-container
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      FLASK_ENV: ${FLASK_ENV:-production}
+      SECRET_KEY: ${SECRET_KEY:-change-me-to-a-secure-random-value-in-production}
+    ports:
+      - "5001:5000"
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - infra_network
+
+networks:
+  infra_network:
+    external: true
+
