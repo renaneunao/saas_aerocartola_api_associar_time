@@ -60,6 +60,18 @@ jobs:
         cache-to: type=gha,mode=max
         platforms: linux/amd64
     
+    - name: Deploy to VPS
+      uses: appleboy/ssh-action@v1
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          cd /root/apps/cartola-aero/cartola-aero-times-receiver
+          docker compose pull
+          docker compose up -d
+          echo "Times Receiver deployed successfully!"
+
     - name: Verify deployment
       run: |
         echo "Docker image built and pushed successfully to Docker Hub!"
