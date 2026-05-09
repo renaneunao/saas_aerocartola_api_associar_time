@@ -68,6 +68,7 @@ jobs:
         key: ${{ secrets.SSH_PRIVATE_KEY }}
         script: |
           cd /root/apps/cartola-aero/cartola-aero-times-receiver
+          docker compose down --remove-orphans || true
           docker compose pull
           docker compose up -d
           echo "Times Receiver deployed successfully!"
