@@ -35,10 +35,10 @@ OIDC_TOKEN_URL = (
 OIDC_USERINFO_URL = (
     "https://goidc.globo.com/auth/realms/globo.com/protocol/openid-connect/userinfo"
 )
-CLIENT_ID = "barra@apps.globoid"
-REDIRECT_URI = "https://www.globo.com/login-callback.ghtml"
-SERVICE_ID = 6870
-HOME_URL = "https://www.globo.com/"
+CLIENT_ID = "cartola-web@apps.globoid"
+REDIRECT_URI = "https://cartola.globo.com"
+SERVICE_ID = 6860
+HOME_URL = "https://cartola.globo.com/"
 SERVICE_URL = f"https://authx-api.globoid.globo.com/v1/service/{SERVICE_ID}"
 FEATURE_FLAGS_URL = "https://authx-api.globoid.globo.com/v1/feature-flags/evaluate"
 SAVE_REDIRECT_URL = "https://authx-api.globoid.globo.com/v1/auth/save-redirect-url"
@@ -634,12 +634,16 @@ def _cartola_team_info(access_token: str, trace: list[str]) -> dict[str, Any] | 
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json",
                 "User-Agent": "aero-cartola-gateway/1.0",
+                "Origin": "https://cartola.globo.com",
+                "Referer": "https://cartola.globo.com/",
+                "x-glb-app": "cartola_web",
+                "x-glb-auth": "oidc",
             },
             timeout=30,
             verify=VERIFY_TLS,
         )
     except requests.RequestException:
-        _trace(trace, "metadados do time: falha de comunicação; associação continuará.")
+        _trace(trace, "metadados do time: falha de comunicação; associação não foi concluída.")
         return None
 
     _trace(trace, f"metadados do time: HTTP {response.status_code}")
@@ -657,7 +661,7 @@ def _store_team(
     access_token: str,
     refresh_token: str,
     id_token: str | None,
-    team_name: str | None,
+    team_name: str,
 ) -> int:
     """Insere na tabela existente; não cria nem altera o schema."""
     missing = [
@@ -723,7 +727,6 @@ def internal_associate_team():
     email = str(data.get("email", "")).strip()
     password = str(data.get("password", ""))
     captcha = str(data.get("captcha", "")).strip()
-    team_name = str(data.get("team_name", "")).strip() or None
     trace: list[str] = []
 
     if user_id <= 0 or not email or not password or not captcha:
@@ -753,7 +756,12 @@ def internal_associate_team():
         time_data = team_info.get("time") if isinstance(team_info, dict) else None
         if not isinstance(time_data, dict):
             time_data = {}
-        resolved_team_name = team_name or time_data.get("nome")
+        resolved_team_name = time_data.get("nome")
+        if not isinstance(resolved_team_name, str) or not resolved_team_name.strip():
+            raise GloboLoginError(
+                "A autenticação foi concluída, mas não foi possível obter o nome do time Cartola."
+            )
+        resolved_team_name = resolved_team_name.strip()
         cartola_team_id = time_data.get("id")
 
         local_team_id = _store_team(

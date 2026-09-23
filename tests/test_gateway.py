@@ -4,6 +4,9 @@ import globo_login_server as gateway
 def test_pkce_context_is_self_consistent():
     context = gateway._new_pkce_context()
 
+    assert gateway.CLIENT_ID == 'cartola-web@apps.globoid'
+    assert gateway.SERVICE_ID == 6860
+    assert gateway.REDIRECT_URI == 'https://cartola.globo.com'
     assert context.state
     assert context.nonce
     assert context.code_verifier
@@ -106,3 +109,42 @@ def test_localhost_aliases_are_allowed_by_cors(monkeypatch):
 
     assert response.status_code == 200
     assert response.headers['Access-Control-Allow-Origin'] == 'http://127.0.0.1:9000'
+
+
+def test_internal_association_requires_cartola_team_name(monkeypatch):
+    monkeypatch.setattr(gateway, 'GATEWAY_SHARED_SECRET', 'local-test-secret')
+
+    monkeypatch.setattr(
+        gateway,
+        '_login_and_get_auth_result',
+        lambda *args: (
+            {
+                'access_token': 'access-secret',
+                'refresh_token': 'refresh-secret',
+                'id_token': 'id-secret',
+            },
+            {},
+        ),
+    )
+    monkeypatch.setattr(gateway, '_cartola_team_info', lambda *args: {'time': {}})
+    store_called = False
+
+    def fail_if_stored(**kwargs):
+        nonlocal store_called
+        store_called = True
+
+    monkeypatch.setattr(gateway, '_store_team', fail_if_stored)
+    response = gateway.app.test_client().post(
+        '/internal/v1/teams/authenticate',
+        headers={'X-Gateway-Key': 'local-test-secret'},
+        json={
+            'user_id': 9,
+            'email': 'test@example.com',
+            'password': 'password',
+            'captcha': 'p1',
+        },
+    )
+
+    assert response.status_code == 401
+    assert 'nome do time Cartola' in response.get_json()['error']
+    assert store_called is False
