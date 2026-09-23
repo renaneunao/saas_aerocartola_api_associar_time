@@ -1,207 +1,69 @@
-# API Associar Time - Servidor de Recepção de Times
+# hCaptcha Study Lab
 
-Servidor Flask responsável por receber payloads de times dos usuários via extensão do navegador e associá-los na tabela `acw_teams`.
+Projeto local de estudo sobre a integração de um widget hCaptcha oficial com um fluxo HTTP de autenticação OIDC/PKCE.
 
-## Estrutura da Tabela `acw_teams`
+O estudo não gera, resolve ou contorna desafios. O P1 é produzido pelo widget oficial após a interação humana e enviado uma única vez ao fluxo de autenticação.
 
-A tabela que armazena os times associados aos usuários possui a seguinte estrutura:
+## Componentes
 
-| Coluna | Tipo | Nullable | Descrição |
-|--------|------|----------|-----------|
-| `id` | SERIAL (INTEGER) | NOT NULL | Chave primária auto-incrementável |
-| `user_id` | INTEGER | NOT NULL | ID do usuário (FK para acw_users.id) |
-| `access_token` | TEXT | NOT NULL | Token de acesso do Cartola |
-| `refresh_token` | TEXT | NOT NULL | Token de refresh do Cartola (contém IDs dos times) |
-| `id_token` | TEXT | NULL | Token de identificação do Cartola (opcional) |
-| `team_name` | TEXT | NULL | Nome do time do Cartola (opcional) |
-| `created_at` | TIMESTAMP | NOT NULL | Data/hora de criação (default: CURRENT_TIMESTAMP) |
-| `updated_at` | TIMESTAMP | NOT NULL | Data/hora de última atualização (default: CURRENT_TIMESTAMP) |
+- `globo_login_server.py`: backend Flask local; executa o fluxo completo em uma única chamada.
+- `frontend/`: demo React com o widget oficial do hCaptcha.
+- `globo_flow/scripts/`: scripts numerados para inspeção e execução isolada:
+  `00_context`, `03_authenticate`, `04_oidc_callback`, `05_token` e `06_userinfo`.
+- `globo_flow/json/`: saída local ignorada pelo Git; pode conter dados sensíveis.
 
-### Relacionamento
+## Fluxo
 
-```
-acw_users (1) ──────< (N) acw_teams
+```text
+00_context → 03_authenticate → 04_oidc_callback → 05_token → 06_userinfo
 ```
 
-- Um usuário pode ter múltiplos times
-- Um time pertence a apenas um usuário
-- Quando um usuário é deletado, todos os seus times são deletados (CASCADE)
+O backend local reproduz a mesma sequência: bootstrap sem P1, redirect OIDC real, `save-redirect-url`, autenticação com P1, provisionamento/finish/confirm, troca do code por tokens e consulta de userinfo.
 
-## Endpoint
+## Execução local
 
-### POST /api/teams/associate
+1. Copie `.env.example` para `.env` e preencha apenas em ambiente local.
+2. Instale as dependências Python:
 
-Associa um time do Cartola a um usuário.
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   ```
 
-#### Payload Esperado
+3. Inicie o backend:
 
-**Todos os campos são obrigatórios:**
-- `user_id` (integer): ID do usuário logado na plataforma
-- `refresh_token` (string): Token de refresh do Cartola que contém os IDs dos times
-- `access_token` (string): Token de acesso atual do Cartola
-- `id_token` (string): Token de identificação do Cartola
-- `team_name` (string): Nome do time do Cartola
+   ```powershell
+   python globo_login_server.py
+   ```
 
-**Nota:** Se já existir um time com o mesmo `user_id` e `team_name`, os tokens serão atualizados (UPDATE) ao invés de criar um novo registro.
+4. Em outro terminal, instale e inicie o demo:
 
-#### Exemplo de Payload
+   ```powershell
+   cd frontend
+   npm install
+   npm start
+   ```
 
-```json
-{
-    "user_id": 123,
-    "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "team_name": "Meu Time FC"
-}
-```
+Abra `http://localhost:9000/`, preencha as credenciais, marque o captcha e execute o fluxo completo.
 
-#### Resposta de Sucesso
+## Gateway interno do Aero Cartola
 
-**201 - Time criado:**
-```json
-{
-    "success": true,
-    "message": "Time criado com sucesso",
-    "team": {
-        "id": 1,
-        "user_id": 123,
-        "team_name": "Meu Time FC",
-        "created_at": "2024-01-01T12:00:00",
-        "updated_at": "2024-01-01T12:00:00"
-    }
-}
-```
+Além do endpoint de laboratório `/api/globo-login`, o backend expõe
+`POST /internal/v1/teams/authenticate`. Ele é destinado exclusivamente ao
+web app, protegido pelo header `X-Gateway-Key` e pela variável
+`GATEWAY_SHARED_SECRET`.
 
-**200 - Time atualizado:**
-```json
-{
-    "success": true,
-    "message": "Time atualizado com sucesso",
-    "team": {
-        "id": 1,
-        "user_id": 123,
-        "team_name": "Meu Time FC",
-        "created_at": "2024-01-01T12:00:00",
-        "updated_at": "2024-01-01T13:00:00"
-    }
-}
-```
+O payload interno contém `user_id`, email, senha, P1 do hCaptcha e nome
+opcional do time. O gateway conclui o fluxo, usa o access token para buscar
+os metadados do time e insere os tokens diretamente na tabela existente
+`acw_teams`. Nenhum token é devolvido na resposta e o gateway não cria nem
+recria tabelas.
 
-**Nota:** Os tokens não são retornados na resposta por segurança.
+O `docker-compose.yml` conecta o serviço à rede externa `infra_network` sem
+publicar a porta para fora da rede Docker. O web app deve usar o alias
+`cartola-aero-associar-gateway:5001` e compartilhar apenas o segredo interno.
 
-#### Respostas de Erro
+## Segurança
 
-**400 - Campos obrigatórios faltando:**
-```json
-{
-    "error": "Campos obrigatórios faltando",
-    "required": ["user_id", "refresh_token", "access_token", "id_token", "team_name"]
-}
-```
-
-**404 - Usuário não encontrado:**
-```json
-{
-    "error": "Usuário não encontrado"
-}
-```
-
-**500 - Erro interno:**
-```json
-{
-    "error": "Erro ao inserir no banco: [detalhes do erro]"
-}
-```
-
-### GET /health
-
-Endpoint de health check.
-
-**Resposta (200):**
-```json
-{
-    "status": "ok",
-    "service": "times-receiver"
-}
-```
-
-## Configuração
-
-### Variáveis de Ambiente
-
-Crie um arquivo `.env` na raiz do projeto:
-
-```env
-# PostgreSQL Configuration
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=sua_senha_aqui
-POSTGRES_DB=cartola_manager
-
-# Flask Configuration
-FLASK_ENV=production
-SECRET_KEY=Ogp3WQ3KTGD2_AcuAk0FFBHZP0erxVip_6aP-W0uk4M
-
-# Server Configuration
-FLASK_PORT=5000
-```
-
-## Deploy com Docker
-
-### Build da Imagem
-
-A imagem Docker é construída automaticamente pelo GitHub Actions quando há push para a branch `main` ou `master`. A imagem é publicada no Docker Hub como `renaneunao/saas-cartola-times-receiver:latest`.
-
-### Executar o Container
-
-```bash
-# Certifique-se de que a rede infra_network existe
-docker network create infra_network
-
-# Iniciar o container
-docker-compose up -d
-
-# Ver logs
-docker-compose logs -f times-receiver
-```
-
-### Parar o serviço
-
-```bash
-docker-compose down
-```
-
-## Logs
-
-Os logs são salvos em `./logs/app.log` e também exibidos no console. Todas as requisições são registradas com:
-- Método HTTP e path
-- Endereço IP remoto
-- Payload (tokens são mascarados por segurança)
-- Status da resposta
-- Erros e exceções
-
-## Estrutura do Projeto
-
-```
-.
-├── app.py                 # Aplicação Flask principal
-├── database.py            # Módulo de conexão com PostgreSQL
-├── requirements.txt       # Dependências Python
-├── Dockerfile            # Configuração do container Docker
-├── docker-compose.yml    # Orquestração Docker Compose
-├── .env                  # Variáveis de ambiente (não versionado)
-├── .gitignore           # Arquivos ignorados pelo Git
-├── logs/                # Diretório de logs
-└── README.md            # Esta documentação
-```
-
-## Notas Importantes
-
-- O servidor roda na porta 5001 (mapeada da porta 5000 do container)
-- A tabela `acw_teams` deve existir no banco de dados PostgreSQL
-- O servidor valida se o `user_id` existe na tabela `acw_users` antes de inserir
-- A tabela permite múltiplos times por usuário
-- Use a mesma rede Docker (`infra_network`) para comunicação entre containers
-- Tokens não são retornados nas respostas por segurança
+Nunca versione `.env`, P1, senhas, cookies, authorization codes, tokens, `userinfo.json` ou outros resultados de execução. O backend e o demo são destinados a uso local e autorizado.

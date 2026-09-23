@@ -1,149 +1,151 @@
-name: Docker Build and Push - Times Receiver
+name: Docker Build and Deploy - Associar Time Gateway
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
     paths:
       - '**/*.py'
-      - '**/*.html'
-      - '**/*.js'
-      - '**/*.css'
       - 'Dockerfile'
       - 'requirements.txt'
       - 'docker-compose.yml'
+      - '.dockerignore'
       - '.github/workflows/docker-build.yml'
-      - 'entrypoint.sh'
   workflow_dispatch:
 
 jobs:
-  build-and-push:
+  build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-    
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: renaneunao
-        password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-    
-    - name: Extract metadata (tags, labels) for Docker
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: renaneunao/saas-cartola-times-receiver
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=raw,value=latest,enable={{is_default_branch}}
-          type=sha,prefix={{branch}}-
-    
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        platforms: linux/amd64,linux/arm64
-    
-    - name: Deploy to VPS
-      uses: appleboy/ssh-action@v1
-      with:
-        host: ${{ secrets.SSH_HOST }}
-        username: ${{ secrets.SSH_USERNAME }}
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        script: |
-          set -Eeuo pipefail
-          cd /root/apps/cartola-aero/cartola-aero-times-receiver
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-          SERVICE="times-receiver"
-          CONTAINER="cartola-aero-times-receiver-container"
-          IMAGE="renaneunao/saas-cartola-times-receiver:latest"
-          HEALTH_TIMEOUT=120
-          HEALTH_URL="http://127.0.0.1:5000/health"
-          PREVIOUS_IMAGE="$(docker inspect --format '{{.Image}}' "$CONTAINER" 2>/dev/null || true)"
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: renaneunao
+          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
-          rollback() {
-            exit_code=$?
-            trap - EXIT
-            if [ "$exit_code" -ne 0 ]; then
-              echo "Deployment validation failed; rolling back."
-              docker compose rm -sf "$SERVICE" || true
-              if [ -n "$PREVIOUS_IMAGE" ]; then
-                docker tag "$PREVIOUS_IMAGE" "$IMAGE"
-                docker compose up -d --no-deps --force-recreate "$SERVICE" || true
-                echo "Rollback completed using image $PREVIOUS_IMAGE."
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: renaneunao/saas-cartola-associar-time-gateway
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push gateway image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Copy production compose
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: docker-compose.yml
+          target: /root/apps/cartola-aero/cartola-aero-times-receiver
+
+      - name: Deploy and validate on Oracle
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -Eeuo pipefail
+
+            APP_DIR="/root/apps/cartola-aero/cartola-aero-times-receiver"
+            WEB_DIR="/root/apps/cartola-aero/cartola-aero-web-app"
+            SERVICE="times-receiver"
+            CONTAINER="cartola-aero-times-receiver-container"
+            IMAGE="renaneunao/saas-cartola-associar-time-gateway:latest"
+            HEALTH_TIMEOUT=180
+
+            cd "$APP_DIR"
+
+            if [ ! -f .env ]; then
+              cp "$WEB_DIR/.env" .env
+            fi
+
+            upsert_env() {
+              file="$1"
+              key="$2"
+              value="$3"
+              touch "$file"
+              if grep -q "^${key}=" "$file"; then
+                sed -i "s#^${key}=.*#${key}=${value}#" "$file"
               else
-                echo "No previous container image was found; rollback is unavailable."
+                printf '\n%s=%s\n' "$key" "$value" >> "$file"
               fi
+            }
+
+            GATEWAY_SECRET="$(grep '^GATEWAY_SHARED_SECRET=' .env | head -1 | cut -d= -f2- || true)"
+            if [ -z "$GATEWAY_SECRET" ]; then
+              GATEWAY_SECRET="$(openssl rand -hex 32)"
             fi
-            exit "$exit_code"
-          }
-          trap rollback EXIT
 
-          docker compose pull "$SERVICE"
-          NEW_IMAGE="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
-          test -n "$NEW_IMAGE"
-          echo "Pulled image $NEW_IMAGE; the current container was left running until this point."
+            upsert_env .env GATEWAY_SHARED_SECRET "$GATEWAY_SECRET"
+            upsert_env .env GLOBO_VERIFY_TLS "1"
 
-          docker compose up -d --no-deps --force-recreate "$SERVICE"
-
-          HEALTHY=0
-          DEADLINE=$((SECONDS + HEALTH_TIMEOUT))
-          while (( SECONDS < DEADLINE )); do
-            STATE="$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)"
-            if [ "$STATE" = "exited" ] || [ "$STATE" = "dead" ]; then
-              docker logs --tail 80 "$CONTAINER" || true
-              exit 1
+            # O web app usa o mesmo segredo e chama o gateway somente pela rede Docker.
+            upsert_env "$WEB_DIR/.env" ASSOCIAR_TIME_GATEWAY_URL "http://cartola-aero-associar-gateway:5001"
+            upsert_env "$WEB_DIR/.env" ASSOCIAR_TIME_GATEWAY_SECRET "$GATEWAY_SECRET"
+            upsert_env "$WEB_DIR/.env" ASSOCIAR_TIME_GATEWAY_TIMEOUT "180"
+            if ! grep -q '^GLOBO_HCAPTCHA_SITEKEY=' "$WEB_DIR/.env"; then
+              upsert_env "$WEB_DIR/.env" GLOBO_HCAPTCHA_SITEKEY "a94854c7-ad52-4d8e-864a-542dde743c65"
             fi
-            if [ "$STATE" = "running" ]; then
-              HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER")"
-              if [ "$HEALTH" = "healthy" ]; then
-                HEALTHY=1
-                break
-              elif [ "$HEALTH" = "unhealthy" ]; then
-                docker logs --tail 80 "$CONTAINER" || true
+
+            # O compose do web app é mantido no servidor; garanta que ele passe as variáveis novas.
+            if ! grep -q 'ASSOCIAR_TIME_GATEWAY_URL' "$WEB_DIR/docker-compose.yml"; then
+              sed -i '/^[[:space:]]*DOMAIN:/a\      ASSOCIAR_TIME_GATEWAY_URL: ${ASSOCIAR_TIME_GATEWAY_URL:-http://cartola-aero-associar-gateway:5001}\n      ASSOCIAR_TIME_GATEWAY_SECRET: ${ASSOCIAR_TIME_GATEWAY_SECRET}\n      ASSOCIAR_TIME_GATEWAY_TIMEOUT: ${ASSOCIAR_TIME_GATEWAY_TIMEOUT:-180}\n      GLOBO_HCAPTCHA_SITEKEY: ${GLOBO_HCAPTCHA_SITEKEY}' "$WEB_DIR/docker-compose.yml"
+            fi
+
+            docker compose pull "$SERVICE"
+            docker compose up -d --no-deps --force-recreate "$SERVICE"
+
+            HEALTHY=0
+            DEADLINE=$((SECONDS + HEALTH_TIMEOUT))
+            while (( SECONDS < DEADLINE )); do
+              STATE="$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)"
+              if [ "$STATE" = "exited" ] || [ "$STATE" = "dead" ]; then
+                docker logs --tail 100 "$CONTAINER" || true
                 exit 1
-              elif [ "$HEALTH" = "none" ] && [ -n "$HEALTH_URL" ]; then
-                if docker exec "$CONTAINER" python -c "import urllib.request; urllib.request.urlopen('$HEALTH_URL', timeout=5)" >/dev/null 2>&1; then
+              fi
+              if [ "$STATE" = "running" ]; then
+                HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER")"
+                if [ "$HEALTH" = "healthy" ]; then
                   HEALTHY=1
                   break
+                elif [ "$HEALTH" = "unhealthy" ]; then
+                  docker logs --tail 100 "$CONTAINER" || true
+                  exit 1
                 fi
-              elif [ "$HEALTH" = "none" ]; then
-                STABLE_UNTIL=$((SECONDS + 15))
-                while (( SECONDS < STABLE_UNTIL )); do
-                  [ "$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)" = "running" ] || exit 1
-                  sleep 5
-                done
-                HEALTHY=1
-                break
               fi
-            fi
-            sleep 5
-          done
+              sleep 5
+            done
 
-          [ "$HEALTHY" -eq 1 ]
-          trap - EXIT
-          echo "Times Receiver deployed and validated successfully!"
+            test "$HEALTHY" -eq 1
+            docker inspect "$CONTAINER" --format 'gateway={{.State.Health.Status}} network={{json .NetworkSettings.Networks}}'
+            echo "Associar Time Gateway deployed and healthy."
 
-    - name: Verify deployment
-      run: |
-        echo "Docker image built and pushed successfully to Docker Hub!"
-        echo "Image digest: ${{ steps.meta.outputs.digest }}"
+      - name: Verify build
+        run: |
+          echo "Gateway image published: ${{ steps.meta.outputs.version }}"

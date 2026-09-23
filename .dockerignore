@@ -1,0 +1,8 @@
+.env
+.git
+.gitignore
+frontend/node_modules
+frontend/dist
+globo_flow/json/*.json
+__pycache__
+*.pyc
