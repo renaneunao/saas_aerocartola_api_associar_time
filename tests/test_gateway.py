@@ -148,3 +148,45 @@ def test_internal_association_requires_cartola_team_name(monkeypatch):
     assert response.status_code == 401
     assert 'nome do time Cartola' in response.get_json()['error']
     assert store_called is False
+
+
+def test_internal_association_rejects_duplicate_team(monkeypatch):
+    monkeypatch.setattr(gateway, 'GATEWAY_SHARED_SECRET', 'local-test-secret')
+    monkeypatch.setattr(
+        gateway,
+        '_login_and_get_auth_result',
+        lambda *args: (
+            {
+                'access_token': 'access-secret',
+                'refresh_token': 'refresh-secret',
+                'id_token': 'id-secret',
+            },
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        gateway,
+        '_cartola_team_info',
+        lambda *args: {'time': {'id': 321, 'nome': 'Time Repetido'}},
+    )
+    monkeypatch.setattr(
+        gateway,
+        '_store_team',
+        lambda **kwargs: (_ for _ in ()).throw(
+            gateway.DuplicateTeamError('Este time já está associado à sua conta.')
+        ),
+    )
+
+    response = gateway.app.test_client().post(
+        '/internal/v1/teams/authenticate',
+        headers={'X-Gateway-Key': 'local-test-secret'},
+        json={
+            'user_id': 9,
+            'email': 'test@example.com',
+            'password': 'password',
+            'captcha': 'p1',
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()['code'] == 'duplicate_team'

@@ -77,6 +77,10 @@ class GatewayStorageError(RuntimeError):
     """Falha de configuração ou persistência no banco do gateway."""
 
 
+class DuplicateTeamError(RuntimeError):
+    """O usuário já possui um time Cartola com o mesmo nome."""
+
+
 def _trace(trace: list[str] | None, message: str) -> None:
     if trace is not None:
         trace.append(message)
@@ -683,6 +687,23 @@ def _store_team(
     try:
         connection = psycopg2.connect(**POSTGRES_CONFIG)
         with connection.cursor() as cursor:
+            normalized_name = team_name.strip()
+            cursor.execute(
+                """
+                SELECT id
+                FROM acw_teams
+                WHERE user_id = %s
+                  AND LOWER(TRIM(team_name)) = LOWER(TRIM(%s))
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (user_id, normalized_name),
+            )
+            if cursor.fetchone():
+                raise DuplicateTeamError(
+                    "Este time já está associado à sua conta."
+                )
+
             cursor.execute(
                 """
                 INSERT INTO acw_teams
@@ -690,7 +711,7 @@ def _store_team(
                 VALUES (%s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (user_id, access_token, refresh_token, id_token, team_name),
+                (user_id, access_token, refresh_token, id_token, normalized_name),
             )
             row = cursor.fetchone()
         connection.commit()
@@ -698,6 +719,10 @@ def _store_team(
             raise GatewayStorageError("O banco não retornou o ID do time associado.")
         return int(row[0])
     except GatewayStorageError:
+        if connection:
+            connection.rollback()
+        raise
+    except DuplicateTeamError:
         if connection:
             connection.rollback()
         raise
@@ -794,6 +819,13 @@ def internal_associate_team():
     except GatewayStorageError as exc:
         _trace(trace, str(exc))
         return jsonify({"error": str(exc), "logs": trace}), 503
+    except DuplicateTeamError as exc:
+        _trace(trace, str(exc))
+        return jsonify({
+            "error": str(exc),
+            "code": "duplicate_team",
+            "logs": trace,
+        }), 409
     except GloboLoginError as exc:
         _trace(trace, f"Associação encerrada: {exc}")
         return jsonify({"error": str(exc), "logs": trace}), 401
